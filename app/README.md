@@ -10,8 +10,8 @@ Peli 的 Flutter 应用包（`peli.lcyk.cc`）—— [usememos/memos](https://gi
 |---|---|
 | `lib/features/web/` | 主界面外壳：官方 Web 前端的令牌注入、附件图片加密缓存、视频流式代理、文件选择接管、系统分享注入 |
 | `lib/features/auth/` | 首次配置（实例地址 + 账号密码 → 长效 PAT） |
-| `lib/data/local/` | SQLCipher 加密库（`accounts` 表）、Keystore 密钥管理、会话机密（图片缓存密钥） |
-| `lib/state/` | 启动流程（打开加密库、载入账号）与 Riverpod 装配 |
+| `lib/data/local/` | 平台安全存储：账号条目（`accounts.v1`）与会话机密（图片缓存密钥），Keystore 适配 |
+| `lib/state/` | 启动流程（读安全存储、载入账号）与 Riverpod 装配 |
 | `lib/ui/tokens/` | 官方 oklch 设计令牌与精确色彩空间转换 |
 
 登录所需的协议客户端在同仓库的 `packages/memos_api`（纯 Dart、可独立测试）。

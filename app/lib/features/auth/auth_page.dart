@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../data/local/account_dao.dart';
+import '../../data/local/account_store.dart';
 import '../../state/providers.dart';
 import '../../ui/tokens/memos_tokens.dart';
 

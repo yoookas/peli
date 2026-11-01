@@ -1,29 +1,22 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:memos_api/memos_api.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 
-import '../data/local/account_dao.dart';
-import '../data/local/app_database.dart';
-import '../data/local/key_manager.dart';
+import '../data/local/account_store.dart';
 
 /// 应用启动后持有的服务集合。
 class AppServices {
   AppServices({
-    required this.database,
-    required this.dao,
+    required this.store,
     required this.accounts,
     this.rejectedAccountIds = const <String>{},
   });
 
-  /// 加密库句柄 —— 由这里持有，保证整个进程生命周期内连接不被关闭。
-  final AppDatabase database;
-  final AccountDao dao;
+  /// 账号存储（Keystore 保护的条目），随进程存活。
+  final AccountStore store;
 
-  /// 已保存的账号（按最近使用排序，见 [AccountDao.listAccounts]）。
+  /// 已保存的账号（按最近使用排序，见 [AccountStore.listAccounts]）。
   final List<AccountRecord> accounts;
 
   /// 启动时被服务端明确拒绝（401）的账号 id：凭据已失效，必须重新登录。
@@ -33,13 +26,10 @@ class AppServices {
   final Set<String> rejectedAccountIds;
 }
 
-/// 启动流程：打开加密库 → 载入账号。
+/// 启动流程：从安全存储载入账号。
 ///
-/// 注意 `keyManager.exists()` 为 false 但数据库文件已存在，说明密钥丢了
-/// （例如恢复了备份但 Keystore 不可用），此时必须显式报错而不是静默新建库。
-///
-/// **每一步都有超时**：启动链路依赖多个平台通道（path_provider、
-/// flutter_secure_storage、sqflite_sqlcipher）。任一通道无响应时，Future 会永久挂起，
+/// **每一步都有超时**：启动链路依赖平台通道（flutter_secure_storage）。
+/// 任一通道无响应时，Future 会永久挂起，
 /// 表现为"白屏且永远不结束"。真机上确实偶发过这种挂起，因此这里用
 /// [_withTimeout] 把"静默挂起"变成"明确的失败提示"，让用户至少知道发生了什么。
 Future<AppServices> bootstrapServices() async {
@@ -51,39 +41,18 @@ Future<AppServices> bootstrapServices() async {
 
   mark('begin');
 
-  final DatabaseKeyManager keyManager = DatabaseKeyManager();
-  final Directory support = await _withTimeout(
-    'getApplicationSupportDirectory',
-    getApplicationSupportDirectory(),
-  );
-  mark('supportDir=${support.path}');
-
-  final String dbPath = p.join(support.path, AppDatabase.fileName);
-  final bool keyExists = await _withTimeout('keyManager.exists', keyManager.exists());
-  mark('keyExists=$keyExists');
-  final bool dbExists = File(dbPath).existsSync();
-  mark('dbExists=$dbExists');
-  if (!keyExists && dbExists) {
-    throw StateError(
-      '本地数据库存在但密钥丢失（通常发生在恢复备份后）。'
-      '为避免数据被覆盖，应用已停止启动。请清除应用数据后重新登录。',
-    );
-  }
-
-  final AppDatabase database = await _withTimeout(
-    'AppDatabase.open',
-    AppDatabase.open(keyManager: keyManager),
-  );
-  mark('dbOpened path=${database.path}');
-
-  final AccountDao dao = AccountDao(database);
-  final List<AccountRecord> accounts = await _withTimeout('listAccounts', dao.listAccounts());
+  // 只做一件事：从 Keystore 保护的条目里读出账号。
+  //
+  // 之前这里还要取目录、读 DEK、打开 SQLCipher 库 —— 那一段整段挡在首帧前面，
+  // 而库里只有一行凭据。现在启动不碰原生库、不碰文件系统。
+  final AccountStore store = AccountStore();
+  final List<AccountRecord> accounts = await _withTimeout('listAccounts', store.listAccounts());
   mark('accounts=${accounts.length}');
 
   final Set<String> rejected = await _rejectedAccounts(accounts);
   mark('rejected=${rejected.length}');
 
-  return AppServices(database: database, dao: dao, accounts: accounts, rejectedAccountIds: rejected);
+  return AppServices(store: store, accounts: accounts, rejectedAccountIds: rejected);
 }
 
 /// 校验「最近使用的那个账号」的凭据是否仍然有效。
@@ -149,7 +118,7 @@ final NotifierProvider<ActiveAccountNotifier, String?> activeAccountIdProvider =
 /// ## 设计（为什么这样做）
 ///
 /// 1. **自动恢复上次使用的账号**：`bootstrapServices()` 已把账号按
-///    `last_used_at DESC` 排好（见 [AccountDao.listAccounts]），取第一个即可。
+///    最近使用在前（见 [AccountStore.listAccounts]），取第一个即可。
 ///    绝大多数用户只有一个账号，于是**永远不需要选**。
 /// 2. **显式选择优先**：用户切换账号后 `set()` 立即写库（`markAccountUsed`），
 ///    下次冷启动恢复的就是他最后选的那个。
@@ -180,8 +149,8 @@ class ActiveAccountNotifier extends Notifier<String?> {
     if (accountId == null) return;
     final AsyncValue<AppServices> services = ref.read(appServicesProvider);
     services.whenData((AppServices value) {
-      // 写库失败不阻塞 UI：最坏情况是下次启动恢复到上一个账号。
-      unawaited(value.dao.markAccountUsed(accountId));
+      // 写入失败不阻塞 UI：最坏情况是下次启动恢复到上一个账号。
+      unawaited(value.store.markAccountUsed(accountId));
     });
   }
 }
@@ -196,7 +165,7 @@ final Provider<AccountRecord?> activeAccountProvider = Provider<AccountRecord?>(
   );
 });
 
-/// 登录：用户名密码 → 长效 PAT → 存进加密库。
+/// 登录：用户名密码 → 长效 PAT → 存进平台安全存储。
 ///
 /// 这是本客户端**唯一**与 memos API 直接交互的地方：拿到 PAT 之后，所有业务请求
 /// 都由页面里的官方前端自己发起，本应用只在 WebView 里替它补上凭据。
@@ -248,7 +217,7 @@ class SessionController {
         displayName: session.user.displayName,
         username: session.user.username.isEmpty ? null : session.user.username,
       );
-      await _services.dao.upsertAccount(account);
+      await _services.store.upsertAccount(account);
       _services.accounts
         ..removeWhere((AccountRecord a) => a.id == account.id)
         ..add(account);

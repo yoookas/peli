@@ -8,16 +8,10 @@ workspace:
   - app
   - packages/memos_api
 
-# 加密数据库说明：
+# 本地存储说明：
 #
-# 官方推荐路径是在这里配置 sqlite3 的 build hook 编入 SQLite3MultipleCiphers：
-#   hooks:
-#     user_defines:
-#       sqlite3:
-#         source: sqlite3mc
-#
-# 但 sqlite3 >= 3.6.0 依赖 hooks ^2.2.0 → record_use → meta ^1.19.0，
-# 而 Flutter 3.44.9 把 meta 钉在 1.18.0，版本无法解析。
-# 因此生产代码改用 sqflite_sqlcipher（SQLCipher 4）+ 显式 `PRAGMA key`。
-# 迁移步骤见仓库根目录方案文档 §12。
+# 本地只有账号（实例地址 + 长效 PAT）与图片缓存密钥，全部存在平台安全存储里
+# （Android 走 Keystore：RSA-OAEP 包裹密钥 + AES-GCM 加密内容），因此本工作区
+# 不再包含任何数据库依赖 —— 之前的 SQLCipher 库已移除，启动链路因此不再加载原生库。
+# 见 app/lib/data/local/account_store.dart 与 secret_store.dart。
 #

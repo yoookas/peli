@@ -1,18 +1,18 @@
-// APK 加密链路静态验证工具。
+// APK 凭据加密链路静态验证工具。
 //
-// 用途：在没有真机的情况下，尽可能验证"发布产物里加密真的在链路里"：
-//   1. APK 内确实打包了 SQLCipher 原生库（libsqlcipher.so），且带着密钥相关符号；
-//   2. 原生库以 STORED（不压缩）方式打包，可直接 mmap，加载不会失败；
-//   3. 各 .so 的 ELF LOAD 段对齐 >= 16 KB（Android 15+ 的 16 KB page size 要求）；
-//   4. 依赖图里用的是 sqflite_sqlcipher（而不是明文 sqflite）；
-//   5. 没有把明文 sqlite3 库打进包。
+// 用途：在没有真机的情况下，验证"发布产物里凭据仍然只以密文落盘"这条链路：
+//   1. 安全存储插件（flutter_secure_storage）确实随包分发；
+//   2. 不再打包 SQLCipher（libsqlcipher.so）—— 账号已改用 Keystore 条目存储；
+//   3. 依赖图里既没有 sqflite_sqlcipher 也没有 sqflite；
+//   4. 原生库以 STORED 方式打包，且 LOAD 段按 16 KB 对齐（Android 15+ 要求）；
+//   5. 明文泄漏哨兵：没有明文 sqlite3 库，asset 里没有 .db / .sqlite 文件。
 //
 // 用法：
 //   dart run tool/verify_apk_encryption.dart [apk 路径]
 //
-// 说明：这一步**不能**替代真机验证。"库文件确为密文"由应用启动时的
-// `AppDatabase._verifyEncryption()` 断言（明文库会直接拒绝启动），
-// 本工具只保证"加密能力确实进了包"。
+// 说明：这一步不能替代真机验证。"账号确为密文"由平台安全存储保证
+// （Keystore 包裹的 AES-GCM），本工具只保证"加密所需的组件确实进了包，
+// 而且没有把解密所需的东西或明文数据库一起打进去"。
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -40,34 +40,62 @@ Future<int> main(List<String> args) async {
     stdout.writeln('APK: $apkPath  (${(apk.lengthSync() / 1024 / 1024).toStringAsFixed(1)} MB)');
     final Map<String, ZipEntryInfo> entries = unzip(apk.path, work.path);
 
-    // ---------------------------------------------------------------- 原生库
-    stdout.writeln('\n1) SQLCipher 原生库是否随包分发');
     final List<File> libs = work
         .listSync(recursive: true)
         .whereType<File>()
         .where((File f) => f.path.endsWith('.so'))
         .toList();
 
+    // -------------------------------------------------------- 1) 安全存储插件
+    stdout.writeln('\n1) 账号存储链路：安全存储插件是否随包分发');
+    final List<File> appLibs =
+        libs.where((File f) => p.basename(f.path) == 'libapp.so').toList();
+    final List<File> dexs = work
+        .listSync(recursive: true)
+        .whereType<File>()
+        .where((File f) => p.basename(f.path).startsWith('classes') && f.path.endsWith('.dex'))
+        .toList();
+    if (appLibs.isEmpty && dexs.isEmpty) {
+      stdout.writeln('  [skip]  找不到 libapp.so / classes*.dex');
+    } else {
+      final bool inSnapshot =
+          appLibs.any((File f) => _strings(f).contains('flutter_secure_storage'));
+      final bool inDex = dexs.any((File f) => _strings(f).contains('flutter_secure_storage'));
+      check(
+        '打包了 flutter_secure_storage（Keystore 保护）',
+        inSnapshot || inDex,
+        'libapp.so=${appLibs.length}, dex=${dexs.length}',
+      );
+    }
+
+    // ------------------------------------------------------- 2) 不再有 SQLCipher
+    stdout.writeln('\n2) 旧的加密数据库是否已彻底移除');
     final List<File> sqlcipherLibs =
         libs.where((File f) => p.basename(f.path).contains('sqlcipher')).toList();
     check(
-      '存在 libsqlcipher.so',
-      sqlcipherLibs.isNotEmpty,
-      sqlcipherLibs.map((File f) => p.basename(p.dirname(f.path))).join(', '),
+      '未打包 libsqlcipher.so',
+      sqlcipherLibs.isEmpty,
+      sqlcipherLibs.map((File f) => p.basename(f.path)).join(', '),
     );
 
-    // ---------------------------------------------------------- 加密 API 符号
-    stdout.writeln('\n2) 加密 API 符号');
-    for (final File lib in sqlcipherLibs) {
-      final String text = _strings(lib);
-      final String abi = p.basename(p.dirname(lib.path));
-      check('$abi: 导出 sqlite3_key', text.contains('sqlite3_key'));
-      check('$abi: 导出 sqlite3_rekey（支持轮换密钥）', text.contains('sqlite3_rekey'));
-      check('$abi: 包含 SQLCipher 标识', text.toLowerCase().contains('sqlcipher'));
+    // ------------------------------------------------------------ 3) 依赖来源
+    stdout.writeln('\n3) 依赖图：不再引入数据库驱动');
+    // pub workspace 下 package_config.json 在 workspace 根，而不是 app/ 目录。
+    final File? packageConfig = <File>[
+      File(p.join('.dart_tool', 'package_config.json')),
+      File(p.join('..', '.dart_tool', 'package_config.json')),
+    ].where((File f) => f.existsSync()).firstOrNull;
+    if (packageConfig == null) {
+      stdout.writeln('  [skip]  找不到 package_config.json');
+    } else {
+      final String json = packageConfig.readAsStringSync();
+      check('依赖 flutter_secure_storage', json.contains('flutter_secure_storage'));
+      check('未依赖 sqflite_sqlcipher', !json.contains('sqflite_sqlcipher'));
+      check('未直接依赖明文 sqflite', !RegExp(r'"name"\s*:\s*"sqflite"').hasMatch(json));
     }
 
-    // -------------------------------------------------- 打包方式与 16 KB 对齐
-    stdout.writeln('\n3) 打包方式与 16 KB 页对齐');
+    // -------------------------------------------------- 4) 打包方式与 16 KB 对齐
+    stdout.writeln('\n4) 打包方式与 16 KB 页对齐');
     for (final MapEntry<String, ZipEntryInfo> entry in entries.entries) {
       if (!entry.key.startsWith('lib/') || !entry.key.endsWith('.so')) continue;
       final ZipEntryInfo zip = entry.value;
@@ -78,9 +106,7 @@ Future<int> main(List<String> args) async {
       );
     }
     final String? readelf = _findReadelf();
-    for (final File lib in libs.where(
-      (File f) => f.path.contains('libsqlcipher') || f.path.contains('libapp'),
-    )) {
+    for (final File lib in libs.where((File f) => f.path.contains('libapp'))) {
       final int maxAlign = readelf == null ? -1 : _maxLoadAlign(readelf, lib.path);
       final String abi = p.basename(p.dirname(lib.path));
       final String name = p.basename(lib.path);
@@ -91,25 +117,16 @@ Future<int> main(List<String> args) async {
       }
     }
 
-    // ------------------------------------------------------------ 依赖来源
-    stdout.writeln('\n4) 依赖图：加密驱动而非明文驱动');
-    // pub workspace 下 package_config.json 在 workspace 根，而不是 app/ 目录。
-    final File? packageConfig = <File>[
-      File(p.join('.dart_tool', 'package_config.json')),
-      File(p.join('..', '.dart_tool', 'package_config.json')),
-    ].where((File f) => f.existsSync()).firstOrNull;
-    if (packageConfig == null) {
-      stdout.writeln('  [skip]  找不到 package_config.json');
-    } else {
-      final String json = packageConfig.readAsStringSync();
-      check('依赖 sqflite_sqlcipher', json.contains('sqflite_sqlcipher'));
-      check('未直接依赖明文 sqflite', !RegExp(r'"name"\s*:\s*"sqflite"').hasMatch(json));
-      check('依赖 flutter_secure_storage（密钥保护）', json.contains('flutter_secure_storage'));
-    }
-
+    // ------------------------------------------------------------ 5) 明文哨兵
     stdout.writeln('\n5) 明文泄漏哨兵');
     final String allSoNames = libs.map((File f) => p.basename(f.path)).join(',');
     check('未把明文 sqlite3 库打进包', !allSoNames.contains('libsqlite3.so'), allSoNames);
+    final List<String> databaseAssets = entries.keys
+        .where((String name) =>
+            !name.startsWith('lib/') &&
+            (name.endsWith('.db') || name.endsWith('.sqlite') || name.endsWith('.sqlite3')))
+        .toList();
+    check('asset 中没有随包分发的数据库文件', databaseAssets.isEmpty, databaseAssets.join(', '));
 
     stdout.writeln(failures == 0 ? '\n结论：静态检查全部通过。' : '\n结论：$failures 项检查未通过。');
     return failures == 0 ? 0 : 1;
@@ -118,8 +135,8 @@ Future<int> main(List<String> args) async {
   }
 }
 
-/// 自带 ZIP 读取：APK 就是 ZIP，但系统工具对 `.apk` 后缀支持不一致
-/// （`Expand-Archive` 只认 `.zip`），所以这里用 Dart 自己解析中央目录。
+/// 自带 ZIP 读取：APK 就是 ZIP，但系统工具对 apk 后缀支持不一致
+/// （PowerShell 的 Expand-Archive 只认 .zip），所以这里用 Dart 自己解析中央目录。
 ///
 /// 返回每个条目名 → 条目信息，并保留压缩方式（用于验证 STORED 打包）。
 Map<String, ZipEntryInfo> unzip(String archive, String destination) {
@@ -183,7 +200,7 @@ class ZipEntryInfo {
   final int method;
 }
 
-/// 提取文件里的可打印字符串（等价于 `strings`），用于符号探测。
+/// 提取文件里的可打印字符串（等价于 strings 命令），用于符号探测。
 String _strings(File file) {
   final List<int> bytes = file.readAsBytesSync();
   final StringBuffer buffer = StringBuffer();
@@ -219,7 +236,7 @@ String? _findReadelf() {
   return null;
 }
 
-/// 解析 `llvm-readelf -lW` 输出里所有 LOAD 段的最大对齐值。
+/// 解析 llvm-readelf -lW 输出里所有 LOAD 段的最大对齐值。
 int _maxLoadAlign(String readelf, String soPath) {
   final ProcessResult result = Process.runSync(readelf, <String>['-lW', soPath]);
   if (result.exitCode != 0) return -1;

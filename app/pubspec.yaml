@@ -15,18 +15,17 @@ dependencies:
   # 登录：用户名密码 → 长效 PAT（本仓库内的纯 Dart 协议客户端）
   memos_api: ^0.1.0
 
-  # 本地加密数据库：sqflite_sqlcipher（SQLCipher 4，原生库随包分发）
-  #
-  # 为什么不用 drift：官方推荐路径是 sqlite3 3.x 的 build hook（`source: sqlite3mc`），
-  # 但 sqlite3 >= 3.6.0 → hooks ^2.2.0 → record_use → meta ^1.19.0，
-  # 而当前 Flutter 把 meta 钉在 1.18.0；同时 drift_dev >= 2.32.0 又强制 sqlite3 ^3.0.0。
-  # 两条路都被依赖解析锁死，因此改用不依赖 sqlite3 包的 sqflite_sqlcipher，
-  # DAO 手写 SQL（见 lib/data/local/）。
-  sqflite_sqlcipher: ^3.4.0
+  # 路径（文件选择、分享进来的临时文件）
   path_provider: ^2.1.5
   path: ^1.9.1
 
-  # 密钥与机密条目（Android 上由 Keystore 保护）
+  # 账号与机密条目的唯一落盘位置（Android 上由 Keystore 保护）。
+  #
+  # 为什么不再用 SQLCipher：本地只有"实例地址 + 长效 PAT"这一行数据，而加载
+  # libsqlcipher.so、打开库、读 DEK、解页的整段工作都在冷启动的关键路径上。
+  # 换成一个 Keystore 条目后加密强度不变（根锁同样是 Keystore），启动不再碰原生库，
+  # 也不再出现"库在、密钥丢 → 拒绝启动"的死局。见 lib/data/local/account_store.dart。
+  #
   # 注意：flutter_secure_storage 11.x 依赖 win32 ^6.0.1，与 file_picker/image_picker
   # 的 win32 ^5.x 冲突；10.3.4 同样支持「RSA-OAEP 包裹 + AES-GCM 存储」且依赖可解。
   flutter_secure_storage: ^10.3.4

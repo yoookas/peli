@@ -22,7 +22,7 @@ void main() {
   runApp(const ProviderScope(child: AppBootstrap()));
 }
 
-/// 启动包装：加密库打开期间显示明确的进度/失败态，避免白屏或静默降级。
+/// 启动包装：读取凭据期间显示明确的进度/失败态，避免白屏或静默降级。
 class AppBootstrap extends ConsumerWidget {
   const AppBootstrap({super.key});
 

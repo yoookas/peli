@@ -13,7 +13,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
 
-import '../../data/local/account_dao.dart';
+import '../../data/local/account_store.dart';
 import '../../data/local/secret_store.dart';
 import '../../state/providers.dart';
 import '../../ui/tokens/memos_tokens.dart';
@@ -406,7 +406,7 @@ class WebAppPageState extends ConsumerState<WebAppPage> with WidgetsBindingObser
   ///
   /// 直接把令牌写进 `localStorage` 意味着**磁盘上有明文令牌** —— 拿到设备的人
   /// 可以读出来，等价于拿到完整账号。而我们同时又把同一个令牌加密存进了
-  /// SQLCipher，等于同一个机密在磁盘上有明文和密文两份，加密形同虚设。
+  /// 平台安全存储，等于同一个机密在磁盘上有明文和密文两份，加密形同虚设。
   ///
   /// ## 现在的做法
   ///

@@ -21,7 +21,7 @@ Flutter / 原生侧只做官方网页**做不到**的事 —— 也就是本文�
 |---|---|---|
 | 主界面 `/` | **官方 Web 前端**（WebView） | 全屏无外壳：没有标题栏、模式切换、悬浮按钮 |
 | 首次配置 `/setup` | 原生 Flutter | 实例地址 + 用户名 + 密码，仅未登录时出现 |
-| 启动 / 失败态 | 原生 Flutter | 打开加密库的进度、密钥丢失与库损坏的明确提示 |
+| 启动 / 失败态 | 原生 Flutter | 读取凭据的进度；安全存储不可用时给出明确失败提示 |
 
 ---
 
@@ -35,7 +35,7 @@ Flutter / 原生侧只做官方网页**做不到**的事 —— 也就是本文�
 | 路由适配 | 0.31.x 的 REST 前缀是 `/api/v1`，26.10 起改为 `/api`（旧路径返回 **410 Gone**）。首次请求自动探测并缓存前缀，两代服务端都能登录 |
 | 版本守门 | 登录时读实例 profile，版本 `< 0.31.0` 直接拒绝并说明原因 |
 | 凭据自检 | 冷启动时用 `GET /api/auth/me` 校验最近账号的 PAT：**只有服务端明确 401** 才回登录页重新签发，断网/超时一律放行（否则一次断网就把人踢下线） |
-| 凭据落盘 | PAT 存进 SQLCipher 加密库的 `accounts` 表；库密钥由 Android Keystore 保护 |
+| 凭据落盘 | 实例地址与 PAT 存进**平台安全存储**的单个条目（`accounts.v1`）；Android 上由 Keystore 包裹的 AES-GCM 加密，冷启动只读这一条 |
 | 免登录注入 | 页面脚本执行前**覆写 `localStorage`** 的 `getItem`/`setItem`/`removeItem`：`getItem` 返回内存副本，`setItem` 直接丢弃 → 前端无感拿到明文，**磁盘上没有明文令牌** |
 | 过期时间 | 故意写成 100 年后。PAT 默认永不过期；若让它"看起来过期"，前端会走 HttpOnly cookie 刷新流程，而 WebView 里没有 cookie，会 401 跳登录页 |
 | 多实例 | 多个实例/账号并存，按 `last_used_at` **自动恢复上次使用的账号**；登录页列出已保存实例可一键切换 |
@@ -96,19 +96,20 @@ Flutter / 原生侧只做官方网页**做不到**的事 —— 也就是本文�
 | 明文清理 | 进入后台即清理 `webview_uploads/` 里的明文交付副本（HTTP 缓存侧则靠 `no-store` 从源头挡住，不再事后 clearCache） |
 | 页面可观测 | `setOnConsoleMessage` 把网页控制台转发到 logcat（`[page:*]` 前缀）—— 页面内的失败只在这里留痕 |
 
-### 2.6 本地数据：加密凭据库
+### 2.6 本地数据：凭据只存一个条目
 
 当前架构下本地只持久化一件事：**实例地址 + 长效 PAT**。界面与业务数据都在官方前端，
-因此不需要在本地保存 memo、附件或同步状态（schema v5 已移除早期"本地优先"架构遗留的表）。
+因此不需要在本地保存 memo、附件或同步状态。
 
 | 功能 | 做法 |
 |---|---|
-| 整库加密 | SQLCipher 4（`sqflite_sqlcipher`）；打开后第一条语句是 `PRAGMA key = "x'<64 hex>'"`（32 字节裸密钥，不做重复 KDF） |
-| 密钥管理 | 32 字节随机 DEK，**不由口令派生**；由 Android Keystore 包裹后存 `flutter_secure_storage`，冷启动无感解锁 |
-| 启动自检 | 读文件头确认不是明文 `SQLite format 3\0`，一旦加密失效立即中止启动 |
-| 密钥丢失保护 | 库文件存在但密钥不存在时**拒绝启动并明确提示**，而不是新建空库覆盖数据 |
+| 存储位置 | 整份账号列表序列化成 JSON，存进平台安全存储的单个键 `accounts.v1` |
+| 加密 | Android 由 Keystore 保护：RSA-OAEP 包裹密钥 + AES-GCM 加密内容，密钥不可导出、不随备份走 |
+| 为什么不用数据库 | 只有一行数据，却要在每次冷启动加载 libsqlcipher.so、打开库、读 DEK、解页 —— 这段工作整段压在首帧关键路径上，而额外保护很有限（DEK 本身也在 Keystore 里，同一把根锁）。移除后启动不再加载任何原生库 |
+| 写入串行化 | 读-改-写串成一条链，避免 `markAccountUsed` 与登录时的写入互相覆盖 |
+| 容错 | 条目缺失或损坏一律视为"未登录"，不会把应用卡在启动阶段 |
 | 备份策略 | `allowBackup=false`，并在 `data_extraction_rules.xml` 排除云备份/设备迁移（Keystore 密钥不随备份走） |
-| 账号记忆 | 记录 `last_used_at`，冷启动**自动恢复**上次使用的账号；登录页可切换已保存实例 |
+| 账号记忆 | 记录最后使用时间，冷启动**自动恢复**上次使用的账号；登录页可切换已保存实例 |
 
 ### 2.7 视觉与诊断
 
@@ -128,7 +129,7 @@ Flutter / 原生侧只做官方网页**做不到**的事 —— 也就是本文�
 
 | 数据 | 处理 |
 |---|---|
-| 登录令牌 | 明文**永不落盘**（`localStorage` 覆写，`setItem` 丢弃）；磁盘上只有 SQLCipher 里的密文 |
+| 登录令牌 | 明文**永不落盘**（`localStorage` 覆写，`setItem` 丢弃）；磁盘上只有平台安全存储里的密文 |
 | 图片缓存 | AES-GCM 密文存 IndexedDB；密钥由 Keystore 保护、只经内存交给页面 |
 | 附件视频 | 不落盘（服务端 `no-store` 原样透传）；兜底路径只放内存 |
 | 文件交付临时文件 | 位于应用缓存目录，**进入后台即清理** |
@@ -159,8 +160,8 @@ flutter test integration_test/edge_to_edge_test.dart   -d <deviceId>  # 2 项：
 
 ```bash
 cd app && dart run tool/verify_apk_encryption.dart build/app/outputs/flutter-apk/app-release.apk
-# 检查 APK 内确实打进了 libsqlcipher.so（含 sqlite3_key 符号）、以 STORED 方式打包、
-# 各 .so 的 ELF 段对齐 ≥ 16 KB、依赖图用的是 sqflite_sqlcipher 而非明文 sqlite
+# 检查包内确实带 flutter_secure_storage、已彻底移除 libsqlcipher.so 与 sqflite 依赖、
+# 原生库以 STORED 方式打包且 ELF 段对齐 ≥ 16 KB、asset 里没有明文数据库文件
 ```
 
 `flutter analyze`（app）与 `dart analyze`（memos_api）均无告警。
@@ -278,7 +279,7 @@ memos_flutter/                     # Dart workspace（pubspec.yaml 声明两个�
 │   └── memos_api/                 纯 Dart：登录 / 换 PAT / 实例版本所需的 API 客户端
 └── app/
     ├── lib/
-    │   ├── data/local/            加密库（accounts）、密钥管理、会话机密（图片缓存密钥）
+    │   ├── data/local/            平台安全存储：账号条目与会话机密（图片缓存密钥）
     │   ├── features/
     │   │   ├── web/               主界面外壳：令牌注入、图片加密缓存、媒体流式代理、文件选择、分享
     │   │   └── auth/              首次配置（实例地址 + 账号密码 → 长效 PAT）
