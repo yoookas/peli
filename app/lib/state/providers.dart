@@ -182,9 +182,17 @@ final Provider<AccountRecord?> activeAccountProvider = Provider<AccountRecord?>(
 /// 这是本客户端**唯一**与 memos API 直接交互的地方：拿到 PAT 之后，所有业务请求
 /// 都由页面里的官方前端自己发起，本应用只在 WebView 里替它补上凭据。
 class SessionController {
-  SessionController(this._ref);
+  SessionController(this._ref, {MemosClient Function(Uri baseUrl)? clientFactory})
+      : _clientFactory = clientFactory ?? _defaultClientFactory;
+
+  /// 生产默认：直接用真实 HTTP。
+  static MemosClient _defaultClientFactory(Uri baseUrl) => MemosClient(baseUrl: baseUrl);
 
   final Ref _ref;
+
+  /// 构造 API 客户端的方式。抽成参数是为了让"登录 → 落盘 → 更新缓存"这条链路
+  /// 能在主机上被测试（用假 HTTP client），而不是只能在真机上试。
+  final MemosClient Function(Uri baseUrl) _clientFactory;
 
   AppServices get _services => _ref.read(appServicesProvider).requireValue;
 
@@ -193,7 +201,7 @@ class SessionController {
     required String username,
     required String password,
   }) async {
-    final MemosClient client = MemosClient(baseUrl: Uri.parse(baseUrl));
+    final MemosClient client = _clientFactory(Uri.parse(baseUrl));
     try {
       final SignInResult session = await client.signIn(username: username, password: password);
       client.accessToken = session.accessToken;
@@ -230,6 +238,8 @@ class SessionController {
         username: session.user.username.isEmpty ? null : session.user.username,
       );
       await _services.store.upsertAccount(account);
+      // 更新进程内缓存。这里要求 accounts 是可增长列表 —— AppServices 与
+      // AccountStore.listAccounts 都保证了这一点（见各自的注释）。
       _services.accounts
         ..removeWhere((AccountRecord a) => a.id == account.id)
         ..add(account);
