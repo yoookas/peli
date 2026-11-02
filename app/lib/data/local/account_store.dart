@@ -103,10 +103,16 @@ class AccountStore {
   ///
   /// 排序而非额外记录"当前账号"：启动时取第一个即可，少一次往返，
   /// 而且天然处理了"上次用的账号已被删除"的情况。
+  ///
+  /// **必须返回可增长列表**：返回值会被 `AppServices.accounts` 当成进程内的账号
+  /// 缓存，登录成功后调用方会原地 `removeWhere + add` 更新它。曾经这里写成
+  /// `toList(growable: false)`，结果登录时直接抛
+  /// "Unsupported operation: Cannot remove from a fixed-length list" ——
+  /// 账号其实已经落盘，但界面停在错误提示上。
   Future<List<AccountRecord>> listAccounts() => _serialized(() async {
         final List<_StoredAccount> stored = await _read();
         stored.sort(_compare);
-        return stored.map((_StoredAccount a) => a.record).toList(growable: false);
+        return stored.map((_StoredAccount a) => a.record).toList();
       });
 
   /// 写入或更新账号。

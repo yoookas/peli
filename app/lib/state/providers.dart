@@ -10,14 +10,19 @@ import '../data/local/legacy_cleanup.dart';
 class AppServices {
   AppServices({
     required this.store,
-    required this.accounts,
+    required List<AccountRecord> accounts,
     this.rejectedAccountIds = const <String>{},
-  });
+  }) : accounts = List<AccountRecord>.of(accounts, growable: true);
 
   /// 账号存储（Keystore 保护的条目），随进程存活。
   final AccountStore store;
 
   /// 已保存的账号（按最近使用排序，见 [AccountStore.listAccounts]）。
+  ///
+  /// **必须可增长**：登录成功后 [SessionController.signIn] 会原地
+  /// `removeWhere + add` 更新这份缓存。这里显式复制成可增长列表，
+  /// 不再依赖调用方传进来的列表类型 —— 之前 `AccountStore.listAccounts` 返回
+  /// 固定长度列表，导致登录时抛 "Cannot remove from a fixed-length list"。
   final List<AccountRecord> accounts;
 
   /// 启动时被服务端明确拒绝（401）的账号 id：凭据已失效，必须重新登录。

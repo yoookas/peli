@@ -143,4 +143,22 @@ void main() {
     expect(ids, hasLength(3));
     expect(ids.first, anyOf('a', 'b'));
   });
+
+  test('listAccounts 返回可增长列表（登录后会被原地增删）', () async {
+    final FakeSecureStorage storage = FakeSecureStorage();
+    final AccountStore store = build(storage);
+    await store.upsertAccount(account('a'));
+
+    final List<AccountRecord> accounts = await store.listAccounts();
+
+    // 登录成功后 AppServices.accounts 就是这样原地更新的。曾经这里返回固定长度
+    // 列表，结果用户点登录直接看到 "Cannot remove from a fixed-length list"。
+    expect(
+      () => accounts
+        ..removeWhere((AccountRecord r) => r.id == 'a')
+        ..add(account('b')),
+      returnsNormally,
+    );
+    expect(accounts.map((AccountRecord r) => r.id).toList(), <String>['b']);
+  });
 }
