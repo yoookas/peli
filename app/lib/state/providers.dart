@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:memos_api/memos_api.dart';
 
 import '../data/local/account_store.dart';
+import '../data/local/legacy_cleanup.dart';
 
 /// 应用启动后持有的服务集合。
 class AppServices {
@@ -40,6 +41,12 @@ Future<AppServices> bootstrapServices() async {
   }
 
   mark('begin');
+
+  // 顺手清掉旧版本留下的 SQLCipher 库与 DEK（幂等；没有残留就什么都不做）。
+  //
+  // 不 await：清理与"能不能进主界面"无关，绝不该让它挡住首帧。
+  // 后台跑失败也只是"这一版没清干净"，下次启动会重试。
+  unawaited(purgeLegacyDatabase());
 
   // 只做一件事：从 Keystore 保护的条目里读出账号。
   //
